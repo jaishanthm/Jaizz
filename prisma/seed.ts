@@ -91,8 +91,8 @@ async function main() {
   }
 
   // 4. Admin User
-  const adminEmail = process.env.SEED_ADMIN_EMAIL || "admin@jaishanth.dev";
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD || "supersecretpassword123";
+  const adminEmail = process.env.SEED_ADMIN_EMAIL || "jaishanthcys@gmail.com";
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD || "Jaims@1402";
   const adminRole = await prisma.role.findUniqueOrThrow({ where: { key: "ADMIN" } });
   const passwordHash = await bcrypt.hash(adminPassword, 12);
   const adminUser = await prisma.adminUser.upsert({
