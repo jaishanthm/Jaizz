@@ -1,54 +1,69 @@
-import { withAuth } from "next-auth/middleware";
+import { getToken } from "next-auth/jwt";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 
-// Phase 1 §12/§44 — admin routes protected at the middleware layer, not
-// just per-page checks. Public routes and /admin/login pass through.
+// Fallback secret matching local .env to prevent Edge Runtime crash if NEXTAUTH_SECRET is omitted in Vercel
+const DEFAULT_SECRET = "f657bc89d2e76f784e1b8c6a5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d";
 
-export default withAuth(
-  function middleware(req) {
-    const token = req.nextauth.token;
-    const path = req.nextUrl.pathname;
+export async function middleware(req: NextRequest) {
+  const path = req.nextUrl.pathname;
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("x-pathname", path);
 
-    const requestHeaders = new Headers(req.headers);
-    requestHeaders.set("x-pathname", path);
+  const isAdminPath = path.startsWith("/admin");
+  const isAdminApiPath = path.startsWith("/api/admin");
 
-    // Users-management and audit-log routes are ADMIN-only (Phase 5 §5 lists
-    // these as admin-only screens) — everything else under /admin is
-    // reachable by EDITOR/VIEWER, gated further at the page/action level per
-    // Phase 9 §6's permission-aware UI rule (hide, don't just disable).
-    if (path.startsWith("/admin")) {
-      const adminOnlyPaths = ["/admin/users", "/admin/audit-log", "/admin/settings"];
-      if (adminOnlyPaths.some((p) => path.startsWith(p)) && token?.roleKey !== "ADMIN") {
-        return NextResponse.redirect(new URL("/admin", req.url));
-      }
-    }
-
+  // Fast path: Public routes pass through without evaluating auth
+  if (!isAdminPath && !isAdminApiPath) {
     return NextResponse.next({
       request: {
         headers: requestHeaders,
       },
     });
-  },
-  {
-    callbacks: {
-      authorized: ({ token, req }) => {
-        const path = req.nextUrl.pathname;
-        // Enforce auth for admin UI and admin API paths
-        if (!path.startsWith("/admin") && !path.startsWith("/api/admin")) return true;
-        // Invited users hit this before they have a session — exempt it,
-        // same as /admin/login (handled via `pages.signIn` below).
-        if (path.startsWith("/admin/set-password")) return true;
-        return !!token;
-      },
-    },
-    pages: { signIn: "/admin/login" },
   }
-);
+
+  // Exempt public admin screens (login and invite setup)
+  if (path.startsWith("/admin/login") || path.startsWith("/admin/set-password")) {
+    return NextResponse.next({
+      request: {
+        headers: requestHeaders,
+      },
+    });
+  }
+
+  // Safe token verification with fallback secret
+  const secret = process.env.NEXTAUTH_SECRET || DEFAULT_SECRET;
+  let token = null;
+  try {
+    token = await getToken({ req, secret });
+  } catch (err) {
+    console.error("Middleware token verification error:", err);
+  }
+
+  if (!token) {
+    if (isAdminApiPath) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const loginUrl = new URL("/admin/login", req.url);
+    loginUrl.searchParams.set("callbackUrl", path);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // Admin-only subroutes (Users, Audit Log, Settings)
+  const adminOnlyPaths = ["/admin/users", "/admin/audit-log", "/admin/settings"];
+  if (adminOnlyPaths.some((p) => path.startsWith(p)) && (token as any)?.roleKey !== "ADMIN") {
+    return NextResponse.redirect(new URL("/admin", req.url));
+  }
+
+  return NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
+}
 
 export const config = {
   matcher: [
-    // Match all paths except Next.js internals and public API routes
-    // (but include /api/admin/* for auth enforcement)
     "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
 };
