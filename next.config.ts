@@ -27,17 +27,13 @@ const nextConfig: NextConfig = {
             key: "Content-Security-Policy",
             value: [
               "default-src 'self'",
-              "img-src 'self' res.cloudinary.com data:",
+              "img-src 'self' res.cloudinary.com data: blob:",
               "font-src 'self' data:",
-              // 'unsafe-inline' on style-src is required for Tailwind's
-              // arbitrary-value inline styles used throughout (e.g.
-              // style={{ color: 'var(--color-primary)' }}) — a stricter
-              // nonce-based approach is possible but a bigger refactor than
-              // this hardening pass, noted rather than silently loosened
-              // further than necessary.
               "style-src 'self' 'unsafe-inline'",
-              "script-src 'self'",
-              "connect-src 'self'",
+              "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+              "connect-src 'self' https:",
+              "worker-src 'self' blob:",
+              "child-src 'self' blob:",
               "frame-ancestors 'none'",
               "object-src 'none'",
               "base-uri 'self'",

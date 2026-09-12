@@ -1,8 +1,28 @@
 "use client";
 
-import { useState, useEffect, useRef, Suspense } from "react";
+import React, { useState, useEffect, useRef, Suspense, Component, type ErrorInfo, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import Image from "next/image";
+
+// Error boundary to protect the page from WebGL / driver crashes or unsupported features
+class ThreeDErrorBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError(_: Error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.warn("ThreeDErrorBoundary caught WebGL/R3F error:", error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
 
 // Phase 11 §2/§3 — device-tier + reduced-motion + flag-off resolution
 // happens here, BEFORE the Three.js bundle is ever imported. The dynamic
@@ -70,13 +90,15 @@ export default function DeferredThreeDScene({ mode, fallbackSrc }: { mode: Three
 
   return (
     <div ref={containerRef} className="w-full h-full" aria-hidden="true" role="presentation">
-      <Suspense fallback={<Image src={fallbackSrc} alt="" fill className="object-cover" aria-hidden />}>
-        <Scene
-          interactive={tier === "desktop"}
-          lite={mode === "LITE"}
-          onContextLost={() => setContextLost(true)}
-        />
-      </Suspense>
+      <ThreeDErrorBoundary fallback={<Image src={fallbackSrc} alt="" fill className="object-cover" priority aria-hidden />}>
+        <Suspense fallback={<Image src={fallbackSrc} alt="" fill className="object-cover" aria-hidden />}>
+          <Scene
+            interactive={tier === "desktop"}
+            lite={mode === "LITE"}
+            onContextLost={() => setContextLost(true)}
+          />
+        </Suspense>
+      </ThreeDErrorBoundary>
     </div>
   );
 }
