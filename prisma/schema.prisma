@@ -1,0 +1,636 @@
+// ============================================================================
+// Jaishanth M — Portfolio CMS
+// PostgreSQL schema (Prisma) — Phase 1 architecture draft
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          String            @id @default(cuid())
+  key         String            @unique // "ADMIN" | "EDITOR" | "VIEWER" | future custom roles
+  name        String
+  description String?
+  permissions RolePermission[]
+  users       AdminUser[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+}
+
+model Permission {
+  id            String                   @id @default(cuid())
+  key           String                   @unique // e.g. "content.create", "content.publish", "media.upload", "seo.edit", "settings.edit", "users.manage", "audit.view"
+  description   String
+  roles         RolePermission[]
+  userOverrides UserPermissionOverride[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+// Per-user overrides on top of role defaults (grant or revoke a single permission
+// without creating a whole new role). Rare in practice, but keeps RBAC extensible.
+model UserPermissionOverride {
+  id           String     @id @default(cuid())
+  userId       String
+  permissionId String
+  effect       Effect     // GRANT | REVOKE
+  user         AdminUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, permissionId])
+}
+
+enum Effect {
+  GRANT
+  REVOKE
+}
+
+model AdminUser {
+  id                  String                   @id @default(cuid())
+  name                String
+  email               String                   @unique
+  passwordHash        String
+  roleId              String
+  role                Role                     @relation(fields: [roleId], references: [id])
+  permissionOverrides UserPermissionOverride[]
+  active              Boolean                  @default(true)
+  lastLoginAt         DateTime?
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+
+  blogPosts    BlogPost[]
+  mediaUploads Media[]
+  auditLogs    AuditLog[]
+  inviteTokens InviteToken[]
+}
+
+// QA fix: a signed-and-expiring token is NOT the same thing as a one-time
+// token — the original HMAC scheme could set the password repeatedly
+// within its 24h window since nothing recorded that it had been used.
+// Real single-use requires server-side state. The raw token is never
+// stored — only its SHA-256 hash — so a DB read alone can't be used to
+// impersonate the invite link.
+model InviteToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// IDENTITY / SINGLETONS
+// ---------------------------------------------------------------------------
+
+// Enforce single-row tables at the application layer (fixed id = "singleton").
+model Profile {
+  id                String   @id @default("singleton")
+  displayName       String
+  professionalTitle String
+  shortBio          String
+  longBio           String? // markdown
+  location          String?
+  contactEmail      String?
+  availability      String? // free text: "Open to internships", "Not currently available", etc.
+  profileImageId    String?  @unique
+  profileImage      Media?   @relation("ProfileImage", fields: [profileImageId], references: [id])
+  resumeMediaId     String?  @unique
+  resumeMedia       Media?   @relation("ProfileResume", fields: [resumeMediaId], references: [id])
+  updatedAt         DateTime @updatedAt
+}
+
+model SiteSettings {
+  id                 String   @id @default("singleton")
+  maintenanceMode    Boolean  @default(false)
+  accentColor        String   @default("#3B82F6")
+  glassIntensity     Int      @default(50) // 0-100
+  animationIntensity Int      @default(50) // 0-100
+  threeDMode         ThreeDMode @default(FULL)
+  updatedAt          DateTime @updatedAt
+}
+
+enum ThreeDMode {
+  FULL
+  LITE
+  OFF
+}
+
+// ---------------------------------------------------------------------------
+// NAVIGATION / HOMEPAGE / FEATURE FLAGS
+// ---------------------------------------------------------------------------
+
+model NavigationItem {
+  id            String           @id @default(cuid())
+  label         String
+  url           String
+  order         Int              @default(0)
+  visible       Boolean          @default(true)
+  openInNewTab  Boolean          @default(false)
+  parentId      String?
+  parent        NavigationItem?  @relation("NavChildren", fields: [parentId], references: [id])
+  children      NavigationItem[] @relation("NavChildren")
+}
+
+// One row per ownable section/feature of the site. HomepageSection references
+// a FeatureFlag rather than duplicating enabled/visible logic in two places.
+model FeatureFlag {
+  id              String   @id @default(cuid())
+  key             String   @unique // "hero" | "about" | "education" | "experience" | "skills" |
+                                    // "projects" | "research" | "bug_bounty" | "certifications" |
+                                    // "achievements" | "blog" | "contact" | "resume" | "links" | "three_d"
+  label           String
+  enabled         Boolean  @default(true)
+  homepageVisible Boolean  @default(true)
+  navVisible      Boolean  @default(true)
+  sitemapEligible Boolean  @default(true)
+  sortOrder       Int      @default(0)
+  homepageSection HomepageSection?
+}
+
+model HomepageSection {
+  id            String      @id @default(cuid())
+  featureFlagId String      @unique
+  featureFlag   FeatureFlag @relation(fields: [featureFlagId], references: [id], onDelete: Cascade)
+  order         Int         @default(0)
+}
+
+// ---------------------------------------------------------------------------
+// EDUCATION / EXPERIENCE / SKILLS
+// ---------------------------------------------------------------------------
+
+model Education {
+  id            String   @id @default(cuid())
+  institution   String
+  degree        String
+  field         String?
+  startDate     DateTime
+  endDate       DateTime?
+  description   String?
+  websiteUrl    String?
+  location      String?
+  logoMediaId   String?
+  logoMedia     Media?   @relation(fields: [logoMediaId], references: [id])
+  featured      Boolean  @default(false)
+  visible       Boolean  @default(true)
+  sortOrder     Int      @default(0)
+}
+
+model Experience {
+  id                String              @id @default(cuid())
+  role              String
+  organization      String
+  description       String?
+  startDate         DateTime
+  endDate           DateTime?
+  current           Boolean             @default(false)
+  location          String?
+  organizationUrl   String?
+  logoMediaId       String?
+  logoMedia         Media?              @relation(fields: [logoMediaId], references: [id])
+  featured          Boolean             @default(false)
+  visible           Boolean             @default(true)
+  sortOrder         Int                 @default(0)
+  achievements      ExperienceHighlight[]
+  technologies      ExperienceSkill[]
+}
+
+model ExperienceHighlight {
+  id           String     @id @default(cuid())
+  experienceId String
+  experience   Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+  text         String
+  order        Int        @default(0)
+}
+
+model ExperienceSkill {
+  experienceId String
+  skillId      String
+  experience   Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+  skill        Skill      @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([experienceId, skillId])
+}
+
+model SkillCategory {
+  id      String  @id @default(cuid())
+  name    String
+  order   Int     @default(0)
+  visible Boolean @default(true)
+  skills  Skill[]
+}
+
+model Skill {
+  id          String            @id @default(cuid())
+  categoryId  String
+  category    SkillCategory     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  iconKey     String?
+  order       Int               @default(0)
+  visible     Boolean           @default(true)
+  experiences ExperienceSkill[]
+  projects    ProjectSkill[]
+}
+
+// ---------------------------------------------------------------------------
+// PROJECTS
+// ---------------------------------------------------------------------------
+
+enum ProjectStatus {
+  IN_PROGRESS
+  COMPLETED
+  ARCHIVED
+  MAINTAINED
+}
+
+model Project {
+  id               String              @id @default(cuid())
+  name             String
+  slug             String              @unique
+  shortDescription String
+  fullDescription  String? // markdown
+  category         String?
+  githubUrl        String?
+  liveUrl          String?
+  docsUrl          String?
+  status           ProjectStatus       @default(COMPLETED)
+  featured         Boolean             @default(false)
+  visible          Boolean             @default(true)
+  startDate        DateTime?
+  endDate          DateTime?
+  sortOrder        Int                 @default(0)
+  seoTitle         String?
+  seoDescription   String?
+  ogImageId        String?
+  ogImage          Media?              @relation("ProjectOgImage", fields: [ogImageId], references: [id])
+  screenshots      ProjectScreenshot[]
+  technologies     ProjectSkill[]
+  relatedResearch  Research[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+}
+
+model ProjectScreenshot {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  mediaId   String
+  media     Media   @relation(fields: [mediaId], references: [id])
+  caption   String?
+  order     Int     @default(0)
+}
+
+model ProjectSkill {
+  projectId String
+  skillId   String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  skill     Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, skillId])
+}
+
+// ---------------------------------------------------------------------------
+// SECURITY RESEARCH
+// ---------------------------------------------------------------------------
+
+enum DisclosureStatus {
+  DRAFT
+  RESEARCH
+  READY
+  PUBLISHED
+  ARCHIVED
+}
+
+model Research {
+  id                String              @id @default(cuid())
+  title             String
+  slug              String              @unique
+  summary           String
+  content           String // markdown
+  researchType      String? // e.g. "Web Application", "Network", "CTF Writeup"
+  targetContext     String?
+  date              DateTime
+  methodology       String?
+  technicalDetails  String?
+  impact            String?
+  remediation       String?
+  disclosureStatus  DisclosureStatus    @default(DRAFT)
+  featured          Boolean             @default(false)
+  visible           Boolean             @default(true)
+  seoTitle          String?
+  seoDescription    String?
+  ogImageId         String?
+  ogImage           Media?              @relation("ResearchOgImage", fields: [ogImageId], references: [id])
+  relatedProjectId  String?
+  relatedProject    Project?            @relation(fields: [relatedProjectId], references: [id])
+  tags              ResearchTag[]
+  references        ResearchReference[]
+  screenshots       ResearchScreenshot[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+}
+
+model ResearchTag {
+  id         String   @id @default(cuid())
+  researchId String
+  research   Research @relation(fields: [researchId], references: [id], onDelete: Cascade)
+  tag        String
+}
+
+model ResearchReference {
+  id         String   @id @default(cuid())
+  researchId String
+  research   Research @relation(fields: [researchId], references: [id], onDelete: Cascade)
+  label      String
+  url        String
+}
+
+model ResearchScreenshot {
+  id         String   @id @default(cuid())
+  researchId String
+  research   Research @relation(fields: [researchId], references: [id], onDelete: Cascade)
+  mediaId    String
+  media      Media    @relation(fields: [mediaId], references: [id])
+  caption    String?
+  order      Int      @default(0)
+}
+
+// ---------------------------------------------------------------------------
+// BUG BOUNTY (independently feature-flagged; hide entirely if no public data)
+// ---------------------------------------------------------------------------
+
+model BugBountyProfile {
+  id             String              @id @default(cuid())
+  platform       String // "Bugcrowd", "HackerOne", "TryHackMe", etc.
+  profileUrl     String
+  researcherName String?
+  description    String?
+  visible        Boolean             @default(true)
+  order          Int                 @default(0)
+  findings       BugBountyFinding[]
+}
+
+model BugBountyFinding {
+  id                  String            @id @default(cuid())
+  bugBountyProfileId  String
+  bugBountyProfile    BugBountyProfile  @relation(fields: [bugBountyProfileId], references: [id], onDelete: Cascade)
+  title               String
+  description         String?
+  date                DateTime?
+  severity            String? // only if truthfully disclosed/public
+  isHallOfFame        Boolean           @default(false)
+  isAcknowledgement    Boolean          @default(false)
+  url                 String?
+  visible             Boolean           @default(true)
+}
+
+// ---------------------------------------------------------------------------
+// CERTIFICATIONS / ACHIEVEMENTS
+// ---------------------------------------------------------------------------
+
+model Certification {
+  id               String   @id @default(cuid())
+  name             String
+  issuer           String
+  credentialId     String?
+  issueDate        DateTime
+  expirationDate   DateTime?
+  verificationUrl  String?
+  imageMediaId     String?
+  imageMedia       Media?   @relation(fields: [imageMediaId], references: [id])
+  description      String?
+  featured         Boolean  @default(false)
+  visible          Boolean  @default(true)
+  sortOrder        Int      @default(0)
+}
+
+enum AchievementCategory {
+  RANKING
+  COMPETITION
+  AWARD
+  ACKNOWLEDGEMENT
+  PUBLICATION
+  MILESTONE
+  OTHER
+}
+
+model Achievement {
+  id          String               @id @default(cuid())
+  title       String
+  category    AchievementCategory
+  description String?
+  date        DateTime?
+  url         String?
+  mediaId     String?
+  media       Media?               @relation(fields: [mediaId], references: [id])
+  featured    Boolean              @default(false)
+  visible     Boolean              @default(true)
+  sortOrder   Int                  @default(0)
+}
+
+// ---------------------------------------------------------------------------
+// BLOG
+// ---------------------------------------------------------------------------
+
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+}
+
+model BlogPost {
+  id              String        @id @default(cuid())
+  title           String
+  slug            String        @unique
+  excerpt         String?
+  content         String // markdown
+  coverImageId    String?
+  coverImage      Media?        @relation("BlogCoverImage", fields: [coverImageId], references: [id])
+  authorId        String
+  author          AdminUser     @relation(fields: [authorId], references: [id])
+  status          PostStatus    @default(DRAFT)
+  publishedAt     DateTime?
+  readingTimeMins Int?
+  canonicalUrl    String?
+  seoTitle        String?
+  seoDescription  String?
+  ogImageId       String?
+  ogImage         Media?        @relation("BlogOgImage", fields: [ogImageId], references: [id])
+  featured        Boolean       @default(false)
+  tags            BlogPostTag[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+}
+
+model BlogTag {
+  id    String        @id @default(cuid())
+  name  String        @unique
+  slug  String        @unique
+  posts BlogPostTag[]
+}
+
+model BlogPostTag {
+  postId String
+  tagId  String
+  post   BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag    BlogTag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, tagId])
+}
+
+// ---------------------------------------------------------------------------
+// SOCIAL LINKS / CONTACT
+// ---------------------------------------------------------------------------
+
+model SocialLink {
+  id          String  @id @default(cuid())
+  platform    String
+  url         String
+  iconKey     String?
+  customLabel String?
+  order       Int     @default(0)
+  visible     Boolean @default(true)
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  read      Boolean  @default(false)
+  ipHash    String? // hashed, never raw IP — privacy + still useful for abuse-rate signals
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// MEDIA
+// ---------------------------------------------------------------------------
+
+enum StorageProvider {
+  CLOUDINARY
+  S3
+  LOCAL
+}
+
+model Media {
+  id              String          @id @default(cuid())
+  url             String
+  storageProvider StorageProvider @default(CLOUDINARY)
+  mimeType        String
+  sizeBytes       Int
+  width           Int?
+  height          Int?
+  altText         String?
+  caption         String?
+  uploadedById    String?
+  uploadedBy      AdminUser?      @relation(fields: [uploadedById], references: [id])
+  createdAt       DateTime        @default(now())
+
+  profileImageOf     Profile?              @relation("ProfileImage")
+  profileResumeOf    Profile?              @relation("ProfileResume")
+  projectOgImageOf   Project[]             @relation("ProjectOgImage")
+  projectScreenshots ProjectScreenshot[]
+  researchOgImageOf  Research[]            @relation("ResearchOgImage")
+  researchScreenshots ResearchScreenshot[]
+  certificationOf    Certification[]
+  achievementOf       Achievement[]
+  blogCoverOf         BlogPost[]           @relation("BlogCoverImage")
+  blogOgImageOf        BlogPost[]           @relation("BlogOgImage")
+  educationLogoOf       Education[]
+  experienceLogoOf      Experience[]
+  defaultOgImageOf       SEOSettings[]
+  faviconOf               SEOSettings[]     @relation("Favicon")
+  pageOgImageOf            PageSEO[]
+}
+
+// ---------------------------------------------------------------------------
+// SEO
+// ---------------------------------------------------------------------------
+
+// Global SEO defaults. Entity-level content (Project, Research, BlogPost)
+// carries its own seoTitle/seoDescription/ogImage inline rather than a
+// separate join table — keeps per-entity SEO co-located with the content it
+// describes. PageSEO below exists only for the small set of static top-level
+// routes (/, /about, /contact, /links, etc.) that have no dedicated model.
+model SEOSettings {
+  id                  String   @id @default("singleton")
+  siteTitle           String
+  siteDescription     String
+  siteName            String
+  authorName          String
+  canonicalBaseUrl    String
+  defaultOgImageId    String?
+  defaultOgImage      Media?   @relation(fields: [defaultOgImageId], references: [id])
+  faviconMediaId      String?
+  faviconMedia        Media?   @relation("Favicon", fields: [faviconMediaId], references: [id])
+  robotsIndex         Boolean  @default(true)
+  robotsFollow        Boolean  @default(true)
+  googleVerification  String?
+  bingVerification    String?
+  defaultKeywords     String[]
+  updatedAt           DateTime @updatedAt
+}
+
+model PageSEO {
+  id             String   @id @default(cuid())
+  path           String   @unique // "/", "/about", "/contact", "/links", "/resume"
+  seoTitle       String?
+  seoDescription String?
+  canonicalUrl   String?
+  ogImageId      String?
+  ogImage        Media?   @relation(fields: [ogImageId], references: [id])
+  noindex        Boolean  @default(false)
+  nofollow       Boolean  @default(false)
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT LOG (unifies "audit log" + "revision history" from the original list
+// — a revision is just an audit log entry with a snapshot payload, keeping
+// one model instead of two overlapping ones)
+// ---------------------------------------------------------------------------
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  PUBLISH
+  UNPUBLISH
+  LOGIN
+  LOGOUT
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String?
+  user       AdminUser?  @relation(fields: [userId], references: [id])
+  action     AuditAction
+  entityType String // "Project", "Research", "BlogPost", "FeatureFlag", etc.
+  entityId   String?
+  snapshot   Json? // before/after diff or full snapshot, for rollback reference
+  createdAt  DateTime    @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
